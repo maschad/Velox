@@ -260,6 +260,7 @@ fn main() {
     telemetry::shutdown_telemetry();
 
     println!("Pipeline shutdown complete");
+    println!("\nPipeline shutdown complete");
 }
 
 /// Drain remaining items from pipeline buffers to avoid data loss on shutdown
@@ -339,7 +340,7 @@ fn ingress_worker(
             rng.gen_range(900000..1100000),
             rng.gen_range(1..1000),
             rng.gen_range(0..2) as u8,
-            tsc_to_ns(start_tsc),
+            tsc_to_ns(rdtsc()),
         );
 
         stats.ingress_generated.fetch_add(1, Ordering::Relaxed);
@@ -491,11 +492,9 @@ fn bundle_worker(
                     let bundle_size = builder.len() as u32;
                     if builder.force_flush(output).is_ok() && bundle_size > 0 {
                         stats.bundle_flushed.fetch_add(1, Ordering::Relaxed);
-                        // Timeout-triggered flush
                         telemetry::record_bundle_flushed(bundle_size, "timeout");
                     }
                 }
-                // Adaptive backoff when idle
                 backoff.snooze();
             }
         }
@@ -506,6 +505,7 @@ fn bundle_worker(
     if builder.force_flush(output).is_ok() && bundle_size > 0 {
         telemetry::record_bundle_flushed(bundle_size, "shutdown");
     }
+    let _ = builder.force_flush(output);
 }
 
 /// Output worker: simulates bundle submission
@@ -538,6 +538,8 @@ fn output_worker(
                 let stage_latency_ns = tsc_to_ns(rdtsc()) - tsc_to_ns(start_tsc);
                 let stage_latency_us = stage_latency_ns as f64 / 1000.0;
                 telemetry::record_transaction_processed("output", bundle.transactions[0].id, stage_latency_us);
+
+                stats.output_received.fetch_add(1, Ordering::Relaxed);
 
                 // Simulate bundle submission (no-op for now)
                 // In production: submit to Solana RPC or Jito
