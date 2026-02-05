@@ -78,6 +78,9 @@ fn main() {
     // Shared statistics
     let stats = Arc::new(Stats::new());
 
+    // Latency histogram
+    let histogram = Arc::new(LatencyHistogram::new());
+
     // Shutdown signal
     let shutdown = Arc::new(AtomicBool::new(false));
 
@@ -150,6 +153,7 @@ fn main() {
     {
         let ring = Arc::clone(&output_ring);
         let stats = Arc::clone(&stats);
+        let histogram = Arc::clone(&histogram);
         let shutdown = Arc::clone(&shutdown);
 
         let handle = thread::Builder::new()
@@ -159,7 +163,7 @@ fn main() {
                     set_for_current(core_id);
                 }
 
-                output_worker(&ring, &stats, &shutdown);
+                output_worker(&ring, &stats, &histogram, &shutdown);
             })
             .expect("Failed to spawn output thread");
 
@@ -227,6 +231,7 @@ fn main() {
 
     // Print final statistics
     stats.print_summary();
+    histogram.print_summary();
     println!("\nPipeline shutdown complete");
 }
 
@@ -252,9 +257,9 @@ fn drain_pipeline(
         };
 
         if txn.is_bid() {
-            let _ = book.update_bid(txn.price, delta, txn.timestamp_ns);
+            let _ = book.update_bid(txn.price, delta, txn.ingress_ts_ns);
         } else {
-            let _ = book.update_ask(txn.price, delta, txn.timestamp_ns);
+            let _ = book.update_ask(txn.price, delta, txn.ingress_ts_ns);
         }
 
         stats.orderbook_processed.fetch_add(1, Ordering::Relaxed);
@@ -355,9 +360,9 @@ fn orderbook_worker(
                 };
 
                 let result = if txn.is_bid() {
-                    book.update_bid(txn.price, delta, txn.timestamp_ns)
+                    book.update_bid(txn.price, delta, txn.ingress_ts_ns)
                 } else {
-                    book.update_ask(txn.price, delta, txn.timestamp_ns)
+                    book.update_ask(txn.price, delta, txn.ingress_ts_ns)
                 };
 
                 match result {
@@ -423,6 +428,7 @@ fn bundle_worker(
 fn output_worker(
     ring: &RingBuffer<Bundle, 1024>,
     stats: &Stats,
+    histogram: &LatencyHistogram,
     shutdown: &AtomicBool,
 ) {
     let mut backoff = Backoff::new();
@@ -434,6 +440,13 @@ fn output_worker(
                 backoff.reset();
 
                 stats.output_received.fetch_add(1, Ordering::Relaxed);
+
+                // Record latency for each transaction in bundle
+                let egress_ts_ns = tsc_to_ns(rdtsc());
+                for i in 0..bundle.count as usize {
+                    let latency_ns = egress_ts_ns.saturating_sub(bundle.transactions[i].ingress_ts_ns);
+                    histogram.record(latency_ns);
+                }
 
                 // Simulate bundle submission (no-op for now)
                 // In production: submit to Solana RPC or Jito

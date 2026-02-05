@@ -26,7 +26,7 @@ fn bench_e2e_latency(c: &mut Criterion) {
 
             // OrderBook processing
             let txn = ingress_ring.pop().unwrap();
-            book.update_bid(txn.price, txn.size as i64, txn.timestamp_ns)
+            book.update_bid(txn.price, txn.size as i64, txn.ingress_ts_ns)
                 .unwrap();
             bundle_ring.push(txn).unwrap();
 
@@ -98,5 +98,43 @@ fn bench_bundle_building(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_e2e_latency, bench_throughput, bench_bundle_building);
+fn bench_bundle_cycle_with_tsc(c: &mut Criterion) {
+    init_tsc();
+
+    c.bench_function("bundle_timed_flush", |b| {
+        let output_ring = RingBuffer::<Bundle, 1024>::new();
+        let mut builder = BundleBuilder::new();
+
+        b.iter(|| {
+            let start_tsc = rdtsc();
+
+            // Fill bundle to capacity
+            for i in 0..BUNDLE_MAX {
+                let txn = Transaction::new_unchecked(i as u64, 1000000 + i as i64, 100, 0, 0);
+                let _ = builder.add(txn, &output_ring);
+            }
+
+            // Measure flush latency
+            let flush_start_tsc = rdtsc();
+            builder.force_flush(&output_ring).ok();
+            let flush_end_tsc = rdtsc();
+
+            let flush_ns = tsc_to_ns(flush_end_tsc - flush_start_tsc);
+            black_box(flush_ns);
+
+            // Clear output ring for next iteration
+            output_ring.pop();
+
+            tsc_to_ns(rdtsc() - start_tsc)
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_e2e_latency,
+    bench_throughput,
+    bench_bundle_building,
+    bench_bundle_cycle_with_tsc
+);
 criterion_main!(benches);
