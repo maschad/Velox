@@ -5,6 +5,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 use velox_engine::*;
 
+mod telemetry;
+
 /// Pipeline configuration
 const INGRESS_RATE_HZ: f64 = 100_000.0; // 100k txn/sec target
 const RUN_DURATION_SECS: u64 = 10; // Run for 10 seconds
@@ -70,6 +72,29 @@ fn main() {
     println!("TSC initialized and calibrated");
     println!();
 
+    // Initialize OpenTelemetry (requires Tokio runtime)
+    // Create a minimal Tokio runtime for OTLP background tasks
+    let _telemetry_rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .thread_name("telemetry-worker")
+        .enable_all()
+        .build()
+        .expect("Failed to build Tokio runtime for telemetry");
+
+    let otlp_endpoint = std::env::var("OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4317".to_string());
+
+    // Enter the runtime context for initialization
+    let _guard = _telemetry_rt.enter();
+
+    match telemetry::init_telemetry("velox-engine", &otlp_endpoint) {
+        Ok(_) => println!("Telemetry initialized: {}", otlp_endpoint),
+        Err(e) => println!("Warning: Telemetry initialization failed: {} (continuing without telemetry)", e),
+    }
+
+    drop(_guard); // Exit runtime context
+    println!();
+
     // Create ring buffers
     let ingress_ring = Arc::new(RingBuffer::<Transaction, 4096>::new());
     let bundle_ring = Arc::new(RingBuffer::<Transaction, 4096>::new());
@@ -83,6 +108,8 @@ fn main() {
 
     // Thread handles
     let mut handles = vec![];
+
+    // Note: _telemetry_rt stays in scope to keep Tokio runtime alive for metric exports
 
     // Core 0: Ingress thread
     {
@@ -227,6 +254,12 @@ fn main() {
 
     // Print final statistics
     stats.print_summary();
+
+    // Shutdown telemetry and flush pending metrics
+    println!("\nFlushing telemetry...");
+    telemetry::shutdown_telemetry();
+
+    println!("Pipeline shutdown complete");
     println!("\nPipeline shutdown complete");
 }
 
@@ -298,8 +331,10 @@ fn ingress_worker(
     let mut rng = rand::thread_rng();
     let lambda = INGRESS_RATE_HZ;
     let mut next_id = 0u64;
+    let mut sample_counter = 0u64;
 
     while !shutdown.load(Ordering::Relaxed) {
+        let start_tsc = rdtsc();
         let txn = Transaction::new_unchecked(
             next_id,
             rng.gen_range(900000..1100000),
@@ -313,10 +348,24 @@ fn ingress_worker(
         match ring.push(txn) {
             Ok(_) => {
                 stats.ingress_pushed.fetch_add(1, Ordering::Relaxed);
+
+                // Instrument AFTER successful push
+                let latency_ns = tsc_to_ns(rdtsc()) - tsc_to_ns(start_tsc);
+                let latency_us = latency_ns as f64 / 1000.0;
+                telemetry::record_transaction_processed("ingress", txn.id, latency_us);
+
+                // Sample ring utilization every 1000 transactions
+                sample_counter += 1;
+                if sample_counter % 1000 == 0 {
+                    let utilization = (ring.len() as f64 / 4096.0) * 100.0;
+                    telemetry::record_ring_utilization("ingress_to_orderbook", utilization);
+                }
+
                 next_id += 1;
             }
             Err(_) => {
                 stats.ingress_dropped.fetch_add(1, Ordering::Relaxed);
+                telemetry::record_ingress_dropped();
             }
         }
 
@@ -340,12 +389,15 @@ fn orderbook_worker(
 ) {
     let book = OrderBook::new();
     let mut backoff = Backoff::new();
+    let mut sample_counter = 0u64;
 
     while !shutdown.load(Ordering::Relaxed) {
         match input.pop() {
             Some(txn) => {
                 // Reset backoff on successful work
                 backoff.reset();
+
+                let start_tsc = rdtsc();
 
                 // Update order book
                 let delta = if txn.is_bid() {
@@ -363,11 +415,25 @@ fn orderbook_worker(
                 match result {
                     Ok(_) => {
                         stats.orderbook_processed.fetch_add(1, Ordering::Relaxed);
+
+                        // Instrument AFTER successful processing
+                        let latency_ns = tsc_to_ns(rdtsc()) - tsc_to_ns(start_tsc);
+                        let latency_us = latency_ns as f64 / 1000.0;
+                        telemetry::record_transaction_processed("orderbook", txn.id, latency_us);
+
+                        // Sample ring utilization every 1000 transactions
+                        sample_counter += 1;
+                        if sample_counter % 1000 == 0 {
+                            let utilization = (output.len() as f64 / 4096.0) * 100.0;
+                            telemetry::record_ring_utilization("orderbook_to_bundle", utilization);
+                        }
+
                         // Forward to bundle builder
                         let _ = output.push(txn); // Drop on full
                     }
                     Err(_) => {
                         stats.orderbook_timeout.fetch_add(1, Ordering::Relaxed);
+                        telemetry::record_orderbook_timeout();
                     }
                 }
             }
@@ -388,6 +454,7 @@ fn bundle_worker(
 ) {
     let mut builder = BundleBuilder::new();
     let mut backoff = Backoff::new();
+    let mut sample_counter = 0u64;
 
     while !shutdown.load(Ordering::Relaxed) {
         match input.pop() {
@@ -395,27 +462,49 @@ fn bundle_worker(
                 // Reset backoff on successful work
                 backoff.reset();
 
+                let start_tsc = rdtsc();
+                let prev_len = builder.len();
+
                 if let Ok(_) = builder.add(txn, output) {
+                    // Instrument AFTER successful add
+                    let latency_ns = tsc_to_ns(rdtsc()) - tsc_to_ns(start_tsc);
+                    let latency_us = latency_ns as f64 / 1000.0;
+                    telemetry::record_transaction_processed("bundle", txn.id, latency_us);
+
                     // Check if bundle was flushed (count reset to 0 or 1)
-                    if builder.len() <= 1 {
+                    if builder.len() <= 1 && prev_len > 1 {
                         stats.bundle_flushed.fetch_add(1, Ordering::Relaxed);
+                        // Size-triggered flush (hit BUNDLE_MAX limit)
+                        telemetry::record_bundle_flushed(BUNDLE_MAX as u32, "size");
+                    }
+
+                    // Sample ring utilization every 1000 transactions
+                    sample_counter += 1;
+                    if sample_counter % 1000 == 0 {
+                        let utilization = (output.len() as f64 / 1024.0) * 100.0;
+                        telemetry::record_ring_utilization("bundle_to_output", utilization);
                     }
                 }
             }
             None => {
                 // Check timeout flush even when idle
                 if builder.should_flush_timeout() {
-                    if builder.force_flush(output).is_ok() {
+                    let bundle_size = builder.len() as u32;
+                    if builder.force_flush(output).is_ok() && bundle_size > 0 {
                         stats.bundle_flushed.fetch_add(1, Ordering::Relaxed);
+                        telemetry::record_bundle_flushed(bundle_size, "timeout");
                     }
                 }
-                // Adaptive backoff when idle
                 backoff.snooze();
             }
         }
     }
 
     // Flush remaining transactions
+    let bundle_size = builder.len() as u32;
+    if builder.force_flush(output).is_ok() && bundle_size > 0 {
+        telemetry::record_bundle_flushed(bundle_size, "shutdown");
+    }
     let _ = builder.force_flush(output);
 }
 
@@ -432,6 +521,23 @@ fn output_worker(
             Some(bundle) => {
                 // Reset backoff on successful work
                 backoff.reset();
+
+                let start_tsc = rdtsc();
+                stats.output_received.fetch_add(1, Ordering::Relaxed);
+
+                // Calculate E2E latency from first transaction's timestamp
+                let now_ns = tsc_to_ns(rdtsc());
+                let first_txn_ns = bundle.transactions[0].timestamp_ns;
+                let e2e_latency_ns = now_ns - first_txn_ns;
+                let e2e_latency_us = e2e_latency_ns as f64 / 1000.0;
+
+                // Record E2E latency
+                telemetry::record_e2e_latency(e2e_latency_us, bundle.transactions[0].id);
+
+                // Record output stage latency
+                let stage_latency_ns = tsc_to_ns(rdtsc()) - tsc_to_ns(start_tsc);
+                let stage_latency_us = stage_latency_ns as f64 / 1000.0;
+                telemetry::record_transaction_processed("output", bundle.transactions[0].id, stage_latency_us);
 
                 stats.output_received.fetch_add(1, Ordering::Relaxed);
 
