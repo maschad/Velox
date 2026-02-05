@@ -17,7 +17,7 @@ opentelemetry-otlp = { version = "0.27", features = ["metrics", "trace"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = { version = "0.5", features = ["html_reports"] }
 loom = "0.7"
 proptest = "1.0"
 

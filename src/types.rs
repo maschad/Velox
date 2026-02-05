@@ -16,7 +16,7 @@ pub struct Transaction {
     pub size: u32,
     pub side: u8,          // 0=bid, 1=ask
     _padding1: [u8; 3],    // Align to 8 bytes
-    pub timestamp_ns: u64,
+    pub ingress_ts_ns: u64,
 }
 
 // Compile-time assertions for Transaction layout
@@ -30,7 +30,7 @@ impl Transaction {
     /// - `InvalidSide`: if side is not 0 (bid) or 1 (ask)
     /// - `NegativePrice`: if price is <= 0
     /// - `ZeroSize`: if size is 0
-    pub fn new(id: u64, price: i64, size: u32, side: u8, timestamp_ns: u64) -> Result<Self, TransactionError> {
+    pub fn new(id: u64, price: i64, size: u32, side: u8, ingress_ts_ns: u64) -> Result<Self, TransactionError> {
         // Validate side (must be 0 or 1)
         if side > 1 {
             return Err(TransactionError::InvalidSide(side));
@@ -52,7 +52,7 @@ impl Transaction {
             size,
             side,
             _padding1: [0; 3],
-            timestamp_ns,
+            ingress_ts_ns,
         })
     }
 
@@ -63,7 +63,7 @@ impl Transaction {
     /// - side is 0 or 1
     /// - price is positive
     /// - size is non-zero
-    pub fn new_unchecked(id: u64, price: i64, size: u32, side: u8, timestamp_ns: u64) -> Self {
+    pub fn new_unchecked(id: u64, price: i64, size: u32, side: u8, ingress_ts_ns: u64) -> Self {
         debug_assert!(side <= 1, "side must be 0 or 1");
         debug_assert!(price > 0, "price must be positive");
         debug_assert!(size > 0, "size must be non-zero");
@@ -74,7 +74,7 @@ impl Transaction {
             size,
             side,
             _padding1: [0; 3],
-            timestamp_ns,
+            ingress_ts_ns,
         }
     }
 
@@ -127,7 +127,7 @@ impl fmt::Debug for Transaction {
             .field("price", &self.price_f64())
             .field("size", &self.size)
             .field("side", &if self.is_bid() { "BID" } else { "ASK" })
-            .field("timestamp_ns", &self.timestamp_ns)
+            .field("ingress_ts_ns", &self.ingress_ts_ns)
             .finish()
     }
 }
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!(txn.price, txn2.price);
         assert_eq!(txn.size, txn2.size);
         assert_eq!(txn.side, txn2.side);
-        assert_eq!(txn.timestamp_ns, txn2.timestamp_ns);
+        assert_eq!(txn.ingress_ts_ns, txn2.ingress_ts_ns);
     }
 
     #[test]

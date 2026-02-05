@@ -1,6 +1,7 @@
 pub mod backoff;
 pub mod bundle;
 pub mod errors;
+pub mod histogram;
 pub mod ingress;
 pub mod orderbook;
 pub mod ring;
@@ -11,6 +12,7 @@ pub mod types;
 pub use backoff::Backoff;
 pub use bundle::{BundleBuilder, BundleFull, BUNDLE_TIMEOUT_NS};
 pub use errors::{BundleError, OrderBookError, TransactionError};
+pub use histogram::LatencyHistogram;
 pub use ingress::{generate_burst, synthetic_ingress, SyntheticStats};
 pub use orderbook::OrderBook;
 pub use ring::RingBuffer;

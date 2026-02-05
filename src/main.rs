@@ -81,15 +81,18 @@ fn main() {
         .build()
         .expect("Failed to build Tokio runtime for telemetry");
 
-    let otlp_endpoint = std::env::var("OTLP_ENDPOINT")
-        .unwrap_or_else(|_| "http://localhost:4317".to_string());
+    let otlp_endpoint =
+        std::env::var("OTLP_ENDPOINT").unwrap_or_else(|_| "http://localhost:4317".to_string());
 
     // Enter the runtime context for initialization
     let _guard = _telemetry_rt.enter();
 
     match telemetry::init_telemetry("velox-engine", &otlp_endpoint) {
         Ok(_) => println!("Telemetry initialized: {}", otlp_endpoint),
-        Err(e) => println!("Warning: Telemetry initialization failed: {} (continuing without telemetry)", e),
+        Err(e) => println!(
+            "Warning: Telemetry initialization failed: {} (continuing without telemetry)",
+            e
+        ),
     }
 
     drop(_guard); // Exit runtime context
@@ -102,6 +105,9 @@ fn main() {
 
     // Shared statistics
     let stats = Arc::new(Stats::new());
+
+    // Latency histogram
+    let histogram = Arc::new(LatencyHistogram::new());
 
     // Shutdown signal
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -177,6 +183,7 @@ fn main() {
     {
         let ring = Arc::clone(&output_ring);
         let stats = Arc::clone(&stats);
+        let histogram = Arc::clone(&histogram);
         let shutdown = Arc::clone(&shutdown);
 
         let handle = thread::Builder::new()
@@ -186,7 +193,7 @@ fn main() {
                     set_for_current(core_id);
                 }
 
-                output_worker(&ring, &stats, &shutdown);
+                output_worker(&ring, &stats, &histogram, &shutdown);
             })
             .expect("Failed to spawn output thread");
 
@@ -238,12 +245,7 @@ fn main() {
 
     // Drain pipeline to avoid data loss
     println!("Draining buffers...");
-    let drained = drain_pipeline(
-        &ingress_ring,
-        &bundle_ring,
-        &output_ring,
-        &stats,
-    );
+    let drained = drain_pipeline(&ingress_ring, &bundle_ring, &output_ring, &stats);
     println!("Drained: {} transactions, {} bundles", drained.0, drained.1);
 
     // Wait for all threads
@@ -254,6 +256,7 @@ fn main() {
 
     // Print final statistics
     stats.print_summary();
+    histogram.print_summary();
 
     // Shutdown telemetry and flush pending metrics
     println!("\nFlushing telemetry...");
@@ -285,9 +288,9 @@ fn drain_pipeline(
         };
 
         if txn.is_bid() {
-            let _ = book.update_bid(txn.price, delta, txn.timestamp_ns);
+            let _ = book.update_bid(txn.price, delta, txn.ingress_ts_ns);
         } else {
-            let _ = book.update_ask(txn.price, delta, txn.timestamp_ns);
+            let _ = book.update_ask(txn.price, delta, txn.ingress_ts_ns);
         }
 
         stats.orderbook_processed.fetch_add(1, Ordering::Relaxed);
@@ -321,11 +324,7 @@ fn drain_pipeline(
 }
 
 /// Ingress worker: generates synthetic transactions
-fn ingress_worker(
-    ring: &RingBuffer<Transaction, 4096>,
-    stats: &Stats,
-    shutdown: &AtomicBool,
-) {
+fn ingress_worker(ring: &RingBuffer<Transaction, 4096>, stats: &Stats, shutdown: &AtomicBool) {
     use rand::Rng;
 
     let mut rng = rand::thread_rng();
@@ -407,9 +406,9 @@ fn orderbook_worker(
                 };
 
                 let result = if txn.is_bid() {
-                    book.update_bid(txn.price, delta, txn.timestamp_ns)
+                    book.update_bid(txn.price, delta, txn.ingress_ts_ns)
                 } else {
-                    book.update_ask(txn.price, delta, txn.timestamp_ns)
+                    book.update_ask(txn.price, delta, txn.ingress_ts_ns)
                 };
 
                 match result {
@@ -512,6 +511,7 @@ fn bundle_worker(
 fn output_worker(
     ring: &RingBuffer<Bundle, 1024>,
     stats: &Stats,
+    histogram: &LatencyHistogram,
     shutdown: &AtomicBool,
 ) {
     let mut backoff = Backoff::new();
@@ -537,9 +537,21 @@ fn output_worker(
                 // Record output stage latency
                 let stage_latency_ns = tsc_to_ns(rdtsc()) - tsc_to_ns(start_tsc);
                 let stage_latency_us = stage_latency_ns as f64 / 1000.0;
-                telemetry::record_transaction_processed("output", bundle.transactions[0].id, stage_latency_us);
+                telemetry::record_transaction_processed(
+                    "output",
+                    bundle.transactions[0].id,
+                    stage_latency_us,
+                );
 
                 stats.output_received.fetch_add(1, Ordering::Relaxed);
+
+                // Record latency for each transaction in bundle
+                let egress_ts_ns = tsc_to_ns(rdtsc());
+                for i in 0..bundle.count as usize {
+                    let latency_ns =
+                        egress_ts_ns.saturating_sub(bundle.transactions[i].ingress_ts_ns);
+                    histogram.record(latency_ns);
+                }
 
                 // Simulate bundle submission (no-op for now)
                 // In production: submit to Solana RPC or Jito

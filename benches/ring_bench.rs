@@ -1,5 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use velox_engine::*;
+use std::sync::Arc;
+use std::thread;
 
 fn bench_ring_push_pop(c: &mut Criterion) {
     init_tsc();
@@ -60,5 +62,75 @@ fn bench_ring_transaction(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_ring_push_pop, bench_ring_transaction);
+fn bench_ring_bulk_throughput(c: &mut Criterion) {
+    init_tsc();
+
+    let mut group = c.benchmark_group("ring_bulk_throughput");
+
+    // 1M operations
+    group.bench_function("1M_ops", |b| {
+        let ring = RingBuffer::<u64, 4096>::new();
+
+        b.iter(|| {
+            for i in 0..1_000_000 {
+                ring.push(black_box(i)).unwrap();
+                black_box(ring.pop().unwrap());
+            }
+        });
+    });
+
+    // 10M operations
+    group.bench_function("10M_ops", |b| {
+        let ring = RingBuffer::<u64, 4096>::new();
+
+        b.iter(|| {
+            for i in 0..10_000_000 {
+                ring.push(black_box(i)).unwrap();
+                black_box(ring.pop().unwrap());
+            }
+        });
+    });
+
+    group.finish();
+}
+
+fn bench_ring_spsc_latency(c: &mut Criterion) {
+    init_tsc();
+
+    c.bench_function("ring_spsc_cross_thread", |b| {
+        b.iter_custom(|iters| {
+            let ring = Arc::new(RingBuffer::<u64, 4096>::new());
+            let ring_consumer = Arc::clone(&ring);
+
+            // Spawn consumer thread
+            let consumer = thread::spawn(move || {
+                for _ in 0..iters {
+                    while ring_consumer.pop().is_none() {
+                        std::hint::spin_loop();
+                    }
+                }
+            });
+
+            // Producer: measure time to push all items
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                while ring.push(black_box(i)).is_err() {
+                    std::hint::spin_loop();
+                }
+            }
+            let elapsed = start.elapsed();
+
+            consumer.join().unwrap();
+            elapsed
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_ring_push_pop,
+    bench_ring_transaction,
+    bench_ring_bulk_throughput,
+    bench_ring_spsc_latency
+);
 criterion_main!(benches);
