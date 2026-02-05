@@ -1,0 +1,43 @@
+[package]
+name = "velox-engine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+static_assertions = "1.1"
+core_affinity = "0.8"
+rand = "0.8"
+
+# OpenTelemetry core (using latest compatible versions)
+opentelemetry = { version = "0.27", features = ["metrics"] }
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio", "metrics"] }
+opentelemetry-otlp = { version = "0.27", features = ["metrics", "trace"] }
+
+# Tokio runtime for async OTLP exporter
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+criterion = "0.5"
+loom = "0.7"
+proptest = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+
+[[bench]]
+name = "ring_bench"
+harness = false
+
+[[bench]]
+name = "orderbook_bench"
+harness = false
+
+[[bench]]
+name = "e2e_bench"
+harness = false
+
+[[bench]]
+name = "telemetry_overhead"
+harness = false
