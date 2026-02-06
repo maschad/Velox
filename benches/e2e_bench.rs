@@ -1,6 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::sync::Arc;
-use std::thread;
 use velox_engine::*;
 
 fn bench_e2e_latency(c: &mut Criterion) {

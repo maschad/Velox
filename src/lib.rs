@@ -5,6 +5,7 @@ pub mod histogram;
 pub mod ingress;
 pub mod orderbook;
 pub mod ring;
+pub mod telemetry;
 pub mod tsc;
 pub mod types;
 
@@ -16,5 +17,7 @@ pub use histogram::LatencyHistogram;
 pub use ingress::{generate_burst, synthetic_ingress, SyntheticStats};
 pub use orderbook::OrderBook;
 pub use ring::RingBuffer;
-pub use tsc::{calibrate_tsc, init_tsc, is_tsc_initialized, ns_to_tsc, rdtsc, spin_sleep_ns, tsc_to_ns};
+pub use tsc::{
+    calibrate_tsc, init_tsc, is_tsc_initialized, ns_to_tsc, rdtsc, spin_sleep_ns, tsc_to_ns,
+};
 pub use types::{Bundle, Transaction, BUNDLE_MAX};

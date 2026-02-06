@@ -260,6 +260,26 @@ impl OrderBook {
         }
         ask - bid
     }
+
+    /// Count of bid levels with non-zero quantity (for telemetry).
+    /// Scans all levels; call at low frequency (e.g. every 1000 txns).
+    #[inline]
+    pub fn depth_bid(&self) -> u64 {
+        self.bids
+            .iter()
+            .filter(|lvl| lvl.quantity.load(Ordering::Relaxed) != 0)
+            .count() as u64
+    }
+
+    /// Count of ask levels with non-zero quantity (for telemetry).
+    /// Scans all levels; call at low frequency (e.g. every 1000 txns).
+    #[inline]
+    pub fn depth_ask(&self) -> u64 {
+        self.asks
+            .iter()
+            .filter(|lvl| lvl.quantity.load(Ordering::Relaxed) != 0)
+            .count() as u64
+    }
 }
 
 // Safety: OrderBook can be shared between threads

@@ -41,7 +41,10 @@ impl<T, const N: usize> RingBuffer<T, N> {
     /// Create a new ring buffer
     pub fn new() -> Self {
         // Verify N is power of 2 at runtime for generic N
-        assert!(N > 0 && (N & (N - 1)) == 0, "RingBuffer size must be power of 2");
+        assert!(
+            N > 0 && (N & (N - 1)) == 0,
+            "RingBuffer size must be power of 2"
+        );
 
         Self {
             head: CachePadded::new(AtomicU64::new(0)),
@@ -77,7 +80,9 @@ impl<T, const N: usize> RingBuffer<T, N> {
         }
 
         // Release: ensure write to slot completes before head increment
-        self.head.value.store(head.wrapping_add(1), Ordering::Release);
+        self.head
+            .value
+            .store(head.wrapping_add(1), Ordering::Release);
         Ok(())
     }
 
@@ -105,7 +110,9 @@ impl<T, const N: usize> RingBuffer<T, N> {
         };
 
         // Release: ensure read from slot completes before tail increment
-        self.tail.value.store(tail.wrapping_add(1), Ordering::Release);
+        self.tail
+            .value
+            .store(tail.wrapping_add(1), Ordering::Release);
         Some(value)
     }
 
@@ -137,8 +144,12 @@ unsafe impl<T: Send, const N: usize> Sync for RingBuffer<T, N> {}
 
 impl<T, const N: usize> Drop for RingBuffer<T, N> {
     fn drop(&mut self) {
-        // Drop all remaining elements
-        while self.pop().is_some() {}
+        let head = *self.head.value.get_mut();
+        let tail = *self.tail.value.get_mut();
+        for i in tail..head {
+            let idx = (i as usize) & (N - 1);
+            unsafe { ptr::drop_in_place((*self.slots[idx].get()).as_mut_ptr()) }
+        }
     }
 }
 

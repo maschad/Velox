@@ -9,7 +9,7 @@ mod telemetry;
 
 /// Pipeline configuration
 const INGRESS_RATE_HZ: f64 = 100_000.0; // 100k txn/sec target
-const RUN_DURATION_SECS: u64 = 10; // Run for 10 seconds
+const RUN_DURATION_SECS: u64 = 300; // Run for 5 minutes (for dashboard demo)
 
 /// Statistics tracker
 struct Stats {
@@ -88,11 +88,14 @@ fn main() {
     let _guard = _telemetry_rt.enter();
 
     match telemetry::init_telemetry("velox-engine", &otlp_endpoint) {
-        Ok(_) => println!("Telemetry initialized: {}", otlp_endpoint),
-        Err(e) => println!(
-            "Warning: Telemetry initialization failed: {} (continuing without telemetry)",
-            e
-        ),
+        Ok(_) => {
+            println!("📊 Telemetry exporter configured: {}", otlp_endpoint);
+            println!("   (Metrics will export if collector is running)");
+        }
+        Err(_) => {
+            println!("⚠ Telemetry disabled (initialization failed)");
+            println!("  To enable: docker compose up -d && OTLP_ENDPOINT=http://localhost:4317 cargo run --release");
+        }
     }
 
     drop(_guard); // Exit runtime context
@@ -259,10 +262,8 @@ fn main() {
     histogram.print_summary();
 
     // Shutdown telemetry and flush pending metrics
-    println!("\nFlushing telemetry...");
     telemetry::shutdown_telemetry();
 
-    println!("Pipeline shutdown complete");
     println!("\nPipeline shutdown complete");
 }
 
@@ -420,11 +421,13 @@ fn orderbook_worker(
                         let latency_us = latency_ns as f64 / 1000.0;
                         telemetry::record_transaction_processed("orderbook", txn.id, latency_us);
 
-                        // Sample ring utilization every 1000 transactions
+                        // Sample ring utilization and orderbook depth every 1000 transactions
                         sample_counter += 1;
                         if sample_counter % 1000 == 0 {
                             let utilization = (output.len() as f64 / 4096.0) * 100.0;
                             telemetry::record_ring_utilization("orderbook_to_bundle", utilization);
+                            telemetry::record_orderbook_depth("bid", book.depth_bid());
+                            telemetry::record_orderbook_depth("ask", book.depth_ask());
                         }
 
                         // Forward to bundle builder
@@ -527,7 +530,7 @@ fn output_worker(
 
                 // Calculate E2E latency from first transaction's timestamp
                 let now_ns = tsc_to_ns(rdtsc());
-                let first_txn_ns = bundle.transactions[0].timestamp_ns;
+                let first_txn_ns = bundle.transactions[0].ingress_ts_ns;
                 let e2e_latency_ns = now_ns - first_txn_ns;
                 let e2e_latency_us = e2e_latency_ns as f64 / 1000.0;
 

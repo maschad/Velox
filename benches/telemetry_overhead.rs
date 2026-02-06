@@ -1,7 +1,5 @@
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use velox_engine::*;
-
-mod telemetry;
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use velox_engine::{telemetry, *};
 
 /// Benchmark transaction processing WITHOUT telemetry
 fn bench_baseline(c: &mut Criterion) {
@@ -14,20 +12,14 @@ fn bench_baseline(c: &mut Criterion) {
 
         b.iter(|| {
             let start_tsc = rdtsc();
-            let txn = Transaction::new_unchecked(
-                txn_id,
-                1000000,
-                100,
-                0,
-                tsc_to_ns(start_tsc),
-            );
+            let txn = Transaction::new_unchecked(txn_id, 1000000, 100, 0, tsc_to_ns(start_tsc));
 
             // Push to ring
             let _ = ring.push(txn);
 
             // Pop and process
             if let Some(txn) = ring.pop() {
-                let _ = book.update_bid(txn.price, txn.size as i64, txn.timestamp_ns);
+                let _ = book.update_bid(txn.price, txn.size as i64, txn.ingress_ts_ns);
             }
 
             txn_id += 1;
@@ -50,13 +42,7 @@ fn bench_with_telemetry(c: &mut Criterion) {
 
         b.iter(|| {
             let start_tsc = rdtsc();
-            let txn = Transaction::new_unchecked(
-                txn_id,
-                1000000,
-                100,
-                0,
-                tsc_to_ns(start_tsc),
-            );
+            let txn = Transaction::new_unchecked(txn_id, 1000000, 100, 0, tsc_to_ns(start_tsc));
 
             // Push to ring
             let _ = ring.push(txn);
@@ -64,7 +50,7 @@ fn bench_with_telemetry(c: &mut Criterion) {
             // Pop and process
             if let Some(txn) = ring.pop() {
                 let process_start = rdtsc();
-                let _ = book.update_bid(txn.price, txn.size as i64, txn.timestamp_ns);
+                let _ = book.update_bid(txn.price, txn.size as i64, txn.ingress_ts_ns);
 
                 // Record telemetry AFTER processing
                 let latency_ns = tsc_to_ns(rdtsc()) - tsc_to_ns(process_start);
@@ -100,7 +86,8 @@ fn bench_e2e_comparison(c: &mut Criterion) {
 
             ingress_ring.push(txn).unwrap();
             let txn = ingress_ring.pop().unwrap();
-            book.update_bid(txn.price, txn.size as i64, txn.timestamp_ns).unwrap();
+            book.update_bid(txn.price, txn.size as i64, txn.ingress_ts_ns)
+                .unwrap();
             bundle_ring.push(txn).unwrap();
             let txn = bundle_ring.pop().unwrap();
             builder.add(txn, &output_ring).ok();
@@ -135,7 +122,8 @@ fn bench_e2e_comparison(c: &mut Criterion) {
             // OrderBook
             let txn = ingress_ring.pop().unwrap();
             let ob_start = rdtsc();
-            book.update_bid(txn.price, txn.size as i64, txn.timestamp_ns).unwrap();
+            book.update_bid(txn.price, txn.size as i64, txn.ingress_ts_ns)
+                .unwrap();
             let ob_latency_us = (tsc_to_ns(rdtsc()) - tsc_to_ns(ob_start)) as f64 / 1000.0;
             telemetry::record_transaction_processed("orderbook", txn.id, ob_latency_us);
 
@@ -164,5 +152,10 @@ fn bench_e2e_comparison(c: &mut Criterion) {
     telemetry::shutdown_telemetry();
 }
 
-criterion_group!(benches, bench_baseline, bench_with_telemetry, bench_e2e_comparison);
+criterion_group!(
+    benches,
+    bench_baseline,
+    bench_with_telemetry,
+    bench_e2e_comparison
+);
 criterion_main!(benches);

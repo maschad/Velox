@@ -11,16 +11,16 @@
 
 use opentelemetry::{
     global,
-    metrics::{Counter, Histogram, Gauge, Meter, MeterProvider as _},
+    metrics::{Counter, Gauge, Histogram, Meter, MeterProvider as _},
     KeyValue,
 };
+use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::{
     metrics::{PeriodicReader, SdkMeterProvider},
     runtime,
     trace::{RandomIdGenerator, Sampler, TracerProvider},
     Resource,
 };
-use opentelemetry_otlp::WithExportConfig;
 use std::error::Error;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -43,7 +43,6 @@ pub struct TelemetryHandles {
     // Gauges
     pub ring_buffer_utilization: Gauge<f64>,
     pub orderbook_depth: Gauge<u64>,
-
     // Meter and provider (for shutdown)
     _meter: Meter,
     _meter_provider: SdkMeterProvider,
@@ -163,7 +162,9 @@ pub fn init_telemetry(service_name: &str, otlp_endpoint: &str) -> Result<(), Box
         _meter_provider: meter_provider,
     };
 
-    TELEMETRY.set(handles).map_err(|_| "Telemetry already initialized")?;
+    TELEMETRY
+        .set(handles)
+        .map_err(|_| "Telemetry already initialized")?;
 
     Ok(())
 }
@@ -173,23 +174,22 @@ pub fn init_telemetry(service_name: &str, otlp_endpoint: &str) -> Result<(), Box
 /// # Panics
 /// Panics if telemetry not initialized via `init_telemetry()`
 pub fn telemetry() -> &'static TelemetryHandles {
-    TELEMETRY.get().expect("Telemetry not initialized - call init_telemetry() first")
+    TELEMETRY
+        .get()
+        .expect("Telemetry not initialized - call init_telemetry() first")
 }
 
 /// Shutdown telemetry and flush pending data
 ///
 /// Should be called before application exit to ensure all metrics are exported.
+/// Errors during flush/shutdown are logged but not propagated (graceful degradation).
 pub fn shutdown_telemetry() {
     if let Some(handles) = TELEMETRY.get() {
-        // Force flush before shutdown
-        if let Err(e) = handles._meter_provider.force_flush() {
-            eprintln!("Failed to flush metrics: {:?}", e);
-        }
+        // Force flush before shutdown (suppress connection errors)
+        let _ = handles._meter_provider.force_flush();
 
-        // Shutdown meter provider
-        if let Err(e) = handles._meter_provider.shutdown() {
-            eprintln!("Failed to shutdown meter provider: {:?}", e);
-        }
+        // Shutdown meter provider (suppress connection errors)
+        let _ = handles._meter_provider.shutdown();
     }
 
     // Shutdown global tracer provider
@@ -207,16 +207,14 @@ pub fn record_transaction_processed(stage: &str, _txn_id: u64, latency_us: f64) 
     let handles = telemetry();
 
     // Increment counter
-    handles.transactions_total.add(
-        1,
-        &[KeyValue::new("stage", stage.to_string())],
-    );
+    handles
+        .transactions_total
+        .add(1, &[KeyValue::new("stage", stage.to_string())]);
 
     // Record latency
-    handles.stage_latency_us.record(
-        latency_us,
-        &[KeyValue::new("stage", stage.to_string())],
-    );
+    handles
+        .stage_latency_us
+        .record(latency_us, &[KeyValue::new("stage", stage.to_string())]);
 }
 
 /// Record end-to-end latency from ingress to output
@@ -283,10 +281,9 @@ pub fn record_ring_utilization(stage: &str, utilization_pct: f64) {
 #[inline]
 pub fn record_orderbook_depth(side: &str, depth: u64) {
     let handles = telemetry();
-    handles.orderbook_depth.record(
-        depth,
-        &[KeyValue::new("side", side.to_string())],
-    );
+    handles
+        .orderbook_depth
+        .record(depth, &[KeyValue::new("side", side.to_string())]);
 }
 
 #[cfg(test)]
@@ -302,7 +299,9 @@ mod tests {
         // In CI, we'd mock the exporter or skip this test
         if result.is_ok() {
             let handles = telemetry();
-            handles.transactions_total.add(1, &[KeyValue::new("stage", "test")]);
+            handles
+                .transactions_total
+                .add(1, &[KeyValue::new("stage", "test")]);
             shutdown_telemetry();
         }
     }

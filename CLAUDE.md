@@ -690,3 +690,12 @@ The following components are generic and reusable:
 - [ARM Memory Model Documentation](https://developer.arm.com/documentation/102336/0100)
 - [The Rust Atomics and Locks Book](https://marabos.nl/atomics/)
 - [LMAX Disruptor Pattern](https://lmax-exchange.github.io/disruptor/)
+
+## Rust Development
+When working with Rust crates (especially OpenTelemetry, async runtimes, etc.), always check Cargo.toml for version compatibility BEFORE writing implementation code. Pin compatible versions and verify API signatures against the specific version's docs.
+
+## Docker & Infrastructure
+Before modifying Docker Compose or container infrastructure, verify that dependent services (databases, gateways, APIs) are healthy and reachable. Run `docker compose ps` and check container health before proceeding with application-level debugging.
+
+## Workflow Conventions
+When a task is complex (multi-file, multi-service), break it into phases and confirm each phase works before moving to the next. Run compilation/tests after each phase rather than writing all code first.
